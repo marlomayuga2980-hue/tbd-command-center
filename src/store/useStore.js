@@ -1,71 +1,87 @@
 import { create } from 'zustand';
-import { supabase, dbToAgent, agentToDb, dbToUpdate, updateToDb } from '@/lib/supabase';
-import { SEED_AGENTS, SEED_UPDATES } from '@/data/seedData';
+import { supabase, dbToAgent, agentToDb, dbToCheck, checkToDb, dbToIssue, issueToDb } from '@/lib/supabase';
+import { SEED_AGENTS, buildSeedChecks, SEED_ISSUES } from '@/data/seedData';
 
 let toastCounter = 0;
+const commentTimers = {};
 
-// ── Fetch helpers ─────────────────────────────────────────────
-
-async function fetchAgents() {
-  const { data: agentRows, error: agentErr } = await supabase
-    .from('agents')
-    .select('*')
-    .order('created_at');
-  if (agentErr) throw agentErr;
-
-  const { data: noteRows,       error: noteErr }       = await supabase.from('notes').select('*');
-  const { data: transcriptRows, error: transcriptErr } = await supabase.from('transcripts').select('*');
-  if (noteErr)       console.warn('[TBD] notes fetch error:', noteErr);
-  if (transcriptErr) console.warn('[TBD] transcripts fetch error:', transcriptErr);
-
-  return agentRows.map((row) => ({
-    ...row,
-    notes:       (noteRows       ?? []).filter((n) => n.agent_id === row.id),
-    transcripts: (transcriptRows ?? []).filter((t) => t.agent_id === row.id),
-  })).map(dbToAgent);
+// ── Status derivation ─────────────────────────────────────
+export function deriveStatus(agentId, checks) {
+  const defaults = checks.filter((c) => c.agentId === agentId && c.isDefault);
+  if (defaults.length === 0) return 'warning';
+  const passed = defaults.filter((c) => c.passed).length;
+  if (passed === defaults.length) return 'healthy';
+  if (passed === 0) return 'critical';
+  return 'warning';
 }
 
-async function fetchUpdates() {
+// ── Fetch helpers ─────────────────────────────────────────
+
+async function fetchAgents() {
+  const { data, error } = await supabase.from('agents').select('*').order('created_at');
+  if (error) throw error;
+  return data.map(dbToAgent);
+}
+
+async function fetchChecks() {
   const { data, error } = await supabase
-    .from('updates')
+    .from('maintenance_checks')
+    .select('*')
+    .order('sort_order');
+  if (error) throw error;
+  return data.map(dbToCheck);
+}
+
+async function fetchIssues() {
+  const { data, error } = await supabase
+    .from('issues')
     .select('*')
     .order('created_at', { ascending: false });
   if (error) throw error;
-  return data.map(dbToUpdate);
+  return data.map(dbToIssue);
 }
 
-// ── Store ────────────────────────────────────────────────────
+// ── Tab order ─────────────────────────────────────────────
+export const MAIN_TAB_AGENT_IDS  = ['agent-2', 'agent-3', 'agent-4', 'agent-1'];
+export const DEMO_TAB_AGENT_IDS  = ['demo-1', 'demo-2', 'demo-3', 'demo-4'];
+
+// ── Store ─────────────────────────────────────────────────
 
 export const useStore = create((set, get) => ({
-  // ── State ────────────────────────────────────────────────
-  agents:          [],
-  updates:         [],
-  activeView:      'dashboard',
-  selectedAgentId: null,
-  toasts:          [],
-  confettiBurst:   false,
-  theme:           'light',
-  loading:         true,
-  error:           null,
+  // ── State ──────────────────────────────────────────────
+  agents:            [],
+  maintenanceChecks: [],
+  issues:            [],
+  activeTab:         0,
+  activeDemoSubTab:  0,
+  toasts:            [],
+  confettiBurst:     false,
+  theme:             'light',
+  loading:           true,
+  error:             null,
 
-  // ── Theme ─────────────────────────────────────────────────
+  // ── Theme ──────────────────────────────────────────────
   toggleTheme: () =>
     set((s) => ({ theme: s.theme === 'light' ? 'dark' : 'light' })),
 
-  // ── Initialise ────────────────────────────────────────────
+  // ── Tab navigation ─────────────────────────────────────
+  setActiveTab:        (n) => set({ activeTab: n }),
+  setActiveDemoSubTab: (n) => set({ activeDemoSubTab: n }),
+
+  // ── Initialise ─────────────────────────────────────────
   initialize: async () => {
     try {
-      const [agents, updates] = await Promise.all([fetchAgents(), fetchUpdates()]);
+      const [agents, checks, issues] = await Promise.all([
+        fetchAgents(), fetchChecks(), fetchIssues(),
+      ]);
 
-      // Seed database on first run (empty agents table)
       if (agents.length === 0) {
         await get().seedDatabase();
         return;
       }
 
-      set({ agents, updates, loading: false });
+      set({ agents, maintenanceChecks: checks, issues, loading: false });
       get().subscribeToChanges();
-
     } catch (err) {
       console.error('[TBD] Init error:', err);
       set({ error: err.message, loading: false });
@@ -73,246 +89,166 @@ export const useStore = create((set, get) => ({
   },
 
   seedDatabase: async () => {
-    // Insert seed agents
     for (const a of SEED_AGENTS) {
       const { error } = await supabase.from('agents').upsert(agentToDb(a));
       if (error) console.error('[TBD] seed agent error:', error);
     }
-    // Insert seed notes
-    for (const a of SEED_AGENTS) {
-      for (const n of a.notes) {
-        const { error } = await supabase.from('notes').upsert({
-          id: n.id, agent_id: a.id, body: n.body, note_ts: n.timestamp,
-        });
-        if (error) console.error('[TBD] seed note error:', error);
-      }
+    for (const c of buildSeedChecks()) {
+      const { error } = await supabase.from('maintenance_checks').upsert(c);
+      if (error) console.error('[TBD] seed check error:', error);
     }
-    // Insert seed updates
-    for (const u of SEED_UPDATES) {
-      const { error } = await supabase.from('updates').upsert(updateToDb(u));
-      if (error) console.error('[TBD] seed update error:', error);
+    for (const iss of SEED_ISSUES) {
+      const { error } = await supabase.from('issues').upsert(iss);
+      if (error) console.error('[TBD] seed issue error:', error);
     }
 
-    const [agents, updates] = await Promise.all([fetchAgents(), fetchUpdates()]);
-    console.log('[TBD] seed complete — agents:', agents.length, 'updates:', updates.length);
-    set({ agents, updates, loading: false });
+    const [agents, checks, issues] = await Promise.all([
+      fetchAgents(), fetchChecks(), fetchIssues(),
+    ]);
+    console.log('[TBD] seed complete — agents:', agents.length);
+    set({ agents, maintenanceChecks: checks, issues, loading: false });
     get().subscribeToChanges();
   },
 
   subscribeToChanges: () => {
-    const onAgentChange  = async () => set({ agents:  await fetchAgents() });
-    const onUpdateChange = async () => set({ updates: await fetchUpdates() });
+    const reload = async () => {
+      const [agents, checks, issues] = await Promise.all([
+        fetchAgents(), fetchChecks(), fetchIssues(),
+      ]);
+      set({ agents, maintenanceChecks: checks, issues });
+    };
+    const reloadChecks = async () => set({ maintenanceChecks: await fetchChecks() });
+    const reloadIssues = async () => set({ issues: await fetchIssues() });
 
     supabase
-      .channel('tbd-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'agents' },      onAgentChange)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'notes' },       onAgentChange)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'transcripts' }, onAgentChange)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'updates' },     onUpdateChange)
+      .channel('tbd-realtime-v2')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agents' },             reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_checks' }, reloadChecks)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'issues' },             reloadIssues)
       .subscribe();
   },
 
-  // ── Navigation ────────────────────────────────────────────
-  navigateTo: (view, agentId = null) =>
-    set({ activeView: view, selectedAgentId: agentId }),
-
-  // ── Agent mutations ───────────────────────────────────────
-
-  toggleTest: async (agentId, testKey) => {
-    const agent = get().agents.find((a) => a.id === agentId);
-    if (!agent) return;
-
-    const updatedTests = {
-      ...agent.currentWeekTests,
-      [testKey]: {
-        ...agent.currentWeekTests[testKey],
-        passed:    !agent.currentWeekTests[testKey].passed,
-        timestamp: new Date().toISOString(),
-      },
-    };
-
-    // Optimistic update
-    set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : { ...a, currentWeekTests: updatedTests }
-      ),
-    }));
-
-    const { error } = await supabase
-      .from('agents')
-      .update({ current_week_tests: updatedTests })
-      .eq('id', agentId);
-
-    if (error) {
-      get().addToast({ title: 'Save failed — please retry', variant: 'error' });
-      set({ agents: await fetchAgents() }); // revert
-    }
-  },
-
-  updateTestNotes: async (agentId, testKey, notes) => {
-    const agent = get().agents.find((a) => a.id === agentId);
-    if (!agent) return;
-
-    const updatedTests = {
-      ...agent.currentWeekTests,
-      [testKey]: { ...agent.currentWeekTests[testKey], notes },
-    };
-
-    // Optimistic
-    set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : { ...a, currentWeekTests: updatedTests }
-      ),
-    }));
-
-    await supabase
-      .from('agents')
-      .update({ current_week_tests: updatedTests })
-      .eq('id', agentId);
-  },
+  // ── Agent mutations ────────────────────────────────────
 
   updatePhone: async (agentId, phone) => {
-    // Optimistic
     set((s) => ({
       agents: s.agents.map((a) => a.id === agentId ? { ...a, phone } : a),
     }));
-
-    const { error } = await supabase
-      .from('agents')
-      .update({ phone })
-      .eq('id', agentId);
-
+    const { error } = await supabase.from('agents').update({ phone }).eq('id', agentId);
     if (error) {
       get().addToast({ title: 'Failed to save phone number', variant: 'error' });
       set({ agents: await fetchAgents() });
     }
   },
 
-  addNote: async (agentId, body) => {
-    const id        = `note-${Date.now()}`;
-    const timestamp = new Date().toISOString();
+  // ── Maintenance check mutations ────────────────────────
 
-    // Optimistic
+  toggleCheck: async (checkId) => {
+    const check = get().maintenanceChecks.find((c) => c.id === checkId);
+    if (!check) return;
+
+    const newPassed   = !check.passed;
+    const newCheckedAt = new Date().toISOString();
+
     set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : {
-          ...a,
-          notes: [{ id, body, timestamp }, ...a.notes],
-        }
+      maintenanceChecks: s.maintenanceChecks.map((c) =>
+        c.id !== checkId ? c : { ...c, passed: newPassed, checkedAt: newCheckedAt }
       ),
     }));
 
-    const { error } = await supabase.from('notes').insert({
-      id, agent_id: agentId, body, note_ts: timestamp,
-    });
+    const { error } = await supabase
+      .from('maintenance_checks')
+      .update({ passed: newPassed, checked_at: newCheckedAt })
+      .eq('id', checkId);
 
     if (error) {
-      get().addToast({ title: 'Failed to save note', variant: 'error' });
-      set({ agents: await fetchAgents() });
+      get().addToast({ title: 'Save failed — please retry', variant: 'error' });
+      set({ maintenanceChecks: await fetchChecks() });
     }
   },
 
-  deleteNote: async (agentId, noteId) => {
-    // Optimistic
-    set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : { ...a, notes: a.notes.filter((n) => n.id !== noteId) }
-      ),
-    }));
+  addCheck: async (agentId, label) => {
+    const existing = get().maintenanceChecks.filter((c) => c.agentId === agentId);
+    const sortOrder = existing.length;
+    const id        = `mc-${agentId}-${Date.now()}`;
+    const newCheck  = { id, agentId, label, passed: false, isDefault: false, sortOrder, checkedAt: null };
 
-    await supabase.from('notes').delete().eq('id', noteId);
+    set((s) => ({ maintenanceChecks: [...s.maintenanceChecks, newCheck] }));
+
+    const { error } = await supabase.from('maintenance_checks').insert(checkToDb(newCheck));
+    if (error) {
+      get().addToast({ title: 'Failed to add test', variant: 'error' });
+      set({ maintenanceChecks: await fetchChecks() });
+    }
   },
 
-  markAllTested: async (agentId) => {
-    const agent = get().agents.find((a) => a.id === agentId);
-    if (!agent) return;
+  deleteCheck: async (checkId) => {
+    set((s) => ({ maintenanceChecks: s.maintenanceChecks.filter((c) => c.id !== checkId) }));
+    await supabase.from('maintenance_checks').delete().eq('id', checkId);
+  },
 
-    const ts       = new Date().toISOString();
-    const testKeys = ['callSuccess', 'emailToPM', 'streetcoIntegration'];
-    const updatedTests = Object.fromEntries(
-      testKeys.map((k) => [k, { ...agent.currentWeekTests[k], passed: true, timestamp: ts }])
-    );
+  // ── Issue mutations ────────────────────────────────────
 
-    // Optimistic
+  addIssue: async (agentId, title) => {
+    const id       = `iss-${agentId}-${Date.now()}`;
+    const newIssue = {
+      id, agentId, title,
+      marloResult: 'pending',   marloComment: '',
+      markResult:  'pending',   markComment:  '',
+      michaelResult: 'pending', michaelComment: '',
+      createdAt: new Date().toISOString(),
+    };
+
+    set((s) => ({ issues: [newIssue, ...s.issues] }));
+
+    const { error } = await supabase.from('issues').insert(issueToDb(newIssue));
+    if (error) {
+      get().addToast({ title: 'Failed to add issue', variant: 'error' });
+      set({ issues: await fetchIssues() });
+    }
+  },
+
+  deleteIssue: async (issueId) => {
+    set((s) => ({ issues: s.issues.filter((i) => i.id !== issueId) }));
+    await supabase.from('issues').delete().eq('id', issueId);
+  },
+
+  updateIssueResult: async (issueId, tester, result) => {
+    const field = `${tester}Result`;
     set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : { ...a, currentWeekTests: updatedTests }
-      ),
-      confettiBurst: true,
+      issues: s.issues.map((i) => i.id !== issueId ? i : { ...i, [field]: result }),
     }));
-    setTimeout(() => set({ confettiBurst: false }), 2500);
-    get().addToast({ title: '🎉 All tests passed!', variant: 'success' });
-
     await supabase
-      .from('agents')
-      .update({ current_week_tests: updatedTests })
-      .eq('id', agentId);
+      .from('issues')
+      .update({ [`${tester}_result`]: result })
+      .eq('id', issueId);
   },
 
-  // ── Transcript logs ───────────────────────────────────────
-
-  addTranscript: async (agentId, { title, recordingUrl, transcript }) => {
-    const id        = `tr-${Date.now()}`;
-    const createdAt = new Date().toISOString();
-
+  updateIssueComment: (issueId, tester, comment) => {
+    const field = `${tester}Comment`;
     // Optimistic
     set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : {
-          ...a,
-          transcripts: [{ id, title, recordingUrl, transcript, createdAt }, ...a.transcripts],
-        }
-      ),
+      issues: s.issues.map((i) => i.id !== issueId ? i : { ...i, [field]: comment }),
     }));
-
-    const { error } = await supabase.from('transcripts').insert({
-      id,
-      agent_id:      agentId,
-      title,
-      recording_url: recordingUrl || null,
-      transcript:    transcript   || null,
-      created_at:    createdAt,
-    });
-
-    if (error) {
-      get().addToast({ title: 'Failed to save transcript', variant: 'error' });
-      set({ agents: await fetchAgents() });
-    }
+    // Debounced save
+    const timerKey = `${issueId}-${tester}`;
+    clearTimeout(commentTimers[timerKey]);
+    commentTimers[timerKey] = setTimeout(async () => {
+      await supabase
+        .from('issues')
+        .update({ [`${tester}_comment`]: comment })
+        .eq('id', issueId);
+    }, 600);
   },
 
-  deleteTranscript: async (agentId, transcriptId) => {
-    // Optimistic
+  updateIssueTitle: async (issueId, title) => {
     set((s) => ({
-      agents: s.agents.map((a) =>
-        a.id !== agentId ? a : {
-          ...a,
-          transcripts: a.transcripts.filter((t) => t.id !== transcriptId),
-        }
-      ),
+      issues: s.issues.map((i) => i.id !== issueId ? i : { ...i, title }),
     }));
-
-    await supabase.from('transcripts').delete().eq('id', transcriptId);
+    await supabase.from('issues').update({ title }).eq('id', issueId);
   },
 
-  // ── Updates ───────────────────────────────────────────────
-
-  postUpdate: async (data) => {
-    const id        = `upd-${Date.now()}`;
-    const createdAt = new Date().toISOString();
-    const entry     = { id, createdAt, author: 'You', ...data };
-
-    // Optimistic
-    set((s) => ({ updates: [entry, ...s.updates] }));
-
-    const { error } = await supabase.from('updates').insert(updateToDb(entry));
-
-    if (error) {
-      get().addToast({ title: 'Failed to post update', variant: 'error' });
-      set({ updates: await fetchUpdates() });
-    }
-  },
-
-  // ── Toasts ────────────────────────────────────────────────
+  // ── Toasts ─────────────────────────────────────────────
   addToast: ({ title, variant = 'info', duration = 3000 }) => {
     const id = `toast-${++toastCounter}`;
     set((s) => ({ toasts: [...s.toasts, { id, title, variant }] }));
