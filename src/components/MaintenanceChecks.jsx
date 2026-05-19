@@ -108,18 +108,18 @@ export default function MaintenanceChecks({ agentId }) {
     <div className="card-surface rounded-2xl overflow-hidden">
       {/* Header */}
       <div className="px-5 py-4 border-b border-slate-100 dark:border-white/8 bg-gradient-to-r from-tbd-blue/5 to-transparent dark:from-tbd-blue/8">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-tbd-blue/10 dark:bg-tbd-blue/15 flex items-center justify-center">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-tbd-blue/10 dark:bg-tbd-blue/15 flex items-center justify-center flex-shrink-0">
               <ClipboardCheck className="w-4 h-4 text-tbd-blue" />
             </div>
-            <div>
+            <div className="min-w-0">
               <h2 className="text-slate-900 dark:text-white font-bold text-[15px]">Maintenance Checks</h2>
               <p className="text-slate-400 dark:text-white/35 text-xs font-medium">Regular tests to confirm agent is working</p>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            <span className={`px-3 py-1.5 rounded-xl text-xs font-bold border ${
+            <span className={`px-3 py-1.5 rounded-xl text-xs font-bold border whitespace-nowrap ${
               allPass
                 ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30'
                 : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-white/8 dark:text-white/50 dark:border-white/12'
@@ -129,7 +129,7 @@ export default function MaintenanceChecks({ agentId }) {
             <motion.button
               onClick={() => setAdding(!adding)}
               whileTap={{ scale: 0.94 }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-tbd-blue text-white hover:bg-tbd-deep text-xs font-semibold transition-colors shadow-sm shadow-tbd-blue/30"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-tbd-blue text-white hover:bg-tbd-deep text-xs font-semibold transition-colors shadow-sm shadow-tbd-blue/30 whitespace-nowrap"
             >
               <motion.span animate={{ rotate: adding ? 45 : 0 }} transition={{ duration: 0.18 }}>
                 <Plus className="w-3.5 h-3.5" />
